@@ -1,0 +1,15 @@
+#compdef webcam
+
+_webcam() {
+  local -a commands
+  commands=(
+    'snap:Take a still image'
+    'record:Record video (requires SECS argument)'
+    'preview:Live preview window'
+    'info:Show device, tuning, and VA-API info'
+  )
+  
+  _describe -t commands 'webcam commands' commands
+}
+
+_webcam "$@"

@@ -1,0 +1,25 @@
+[Unit]
+Description=Webcam bridge (libcamera/IPU6 -> v4l2loopback /dev/video42)
+Documentation=file:///home/sadeq/.claude/SYSTEM.md
+After=sound.target
+
+[Service]
+Type=simple
+ExecStartPre=/sbin/modprobe v4l2loopback devices=1 video_nr=42 card_label=Integrated\x20Webcam exclusive_caps=1
+ExecStart=/usr/local/bin/webcam-bridge-run
+ExecStartPost=-/bin/sh -c 'sleep 4; /bin/udevadm trigger --action=change /dev/video42'
+
+# CRITICAL: gst-launch-1.0 only tears the libcamera pipeline down cleanly on SIGINT.
+# On SIGTERM (systemd's default) it dies outright, the IPU6 stream is never stopped,
+# and the kernel logs "stream stop time out" -> the IPU6 firmware wedges and the CSE
+# then refuses to re-authenticate it until the next power cycle. ffmpeg also exits
+# gracefully on SIGINT, so SIGINT is correct for the whole control group.
+KillSignal=SIGINT
+FinalKillSignal=SIGKILL
+TimeoutStopSec=15
+
+# Do NOT auto-restart: a crash loop repeatedly re-initialises fragile IPU6 firmware.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

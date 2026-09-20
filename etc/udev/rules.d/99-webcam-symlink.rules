@@ -1,0 +1,2 @@
+# Create /dev/webcam symlink for the v4l2loopback device
+KERNEL=="video42", SUBSYSTEM=="video4linux", SYMLINK+="webcam"

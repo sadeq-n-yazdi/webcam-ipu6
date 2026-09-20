@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Feeds camera with manual exposure + color correction via ffmpeg.
+set -uo pipefail
+W=${WEBCAM_WIDTH:-1920}; H=${WEBCAM_HEIGHT:-1080}; FPS=${WEBCAM_FPS:-30}
+CC=${WEBCAM_CC:-colorchannelmixer=rr=1.08:gg=0.96:bb=1.06,eq=contrast=1.06:saturation=1.10}
+
+/usr/bin/gst-launch-1.0 -q libcamerasrc \
+      ae-enable=false awb-enable=true awb-mode=auto \
+      analogue-gain-mode=1 analogue-gain=4.0 \
+      exposure-time-mode=1 exposure-time=15000 \
+      contrast=1.25 saturation=1.3 sharpness=1.0 \
+   ! video/x-raw,width=$W,height=$H,framerate=$FPS/1 \
+   ! queue max-size-buffers=5 \
+   ! videorate ! video/x-raw,framerate=$FPS/1 \
+   ! videoconvert ! video/x-raw,format=I420 ! y4menc ! fdsink \
+ | /usr/bin/ffmpeg -hide_banner -loglevel error -f yuv4mpegpipe -i pipe:0 \
+      -vf "$CC" -r $FPS -f v4l2 -pix_fmt yuyv422 /dev/video42

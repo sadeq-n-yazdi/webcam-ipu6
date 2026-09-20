@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# webcam-bridge -- feed the tuned libcamera stream into /dev/video42 (v4l2loopback)
+# so ordinary V4L2 apps (Chrome, Zoom, OBS, ffmpeg -f v4l2) can use this camera.
+#
+# The camera LED is ON only while this bridge runs. It is deliberately NOT started
+# automatically -- run it when you need the webcam, stop it when you're done.
+set -uo pipefail
+
+DEV=${WEBCAM_BRIDGE_DEV:-/dev/video42}
+W=${WEBCAM_WIDTH:-1920}
+H=${WEBCAM_HEIGHT:-1080}
+CC=${WEBCAM_CC:-colorchannelmixer=rr=1.08:gg=0.96:bb=1.06,eq=contrast=1.06:saturation=1.10}
+PIDF=${XDG_RUNTIME_DIR:-/tmp}/webcam-bridge.pid
+
+# Default exposure settings
+GAIN=${WEBCAM_GAIN:-4.0}
+EXPOSURE=${WEBCAM_EXPOSURE:-15000}
+
+# Parse options (modifies global GAIN/EXPOSURE)
+parse_opts() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --bright)
+        GAIN=2.0; EXPOSURE=8000; shift ;;
+      --normal)
+        GAIN=4.0; EXPOSURE=15000; shift ;;
+      --dark)
+        GAIN=8.0; EXPOSURE=25000; shift ;;
+      --night)
+        GAIN=12.0; EXPOSURE=33000; shift ;;
+      --gain)
+        GAIN="$2"; shift 2 ;;
+      --exposure)
+        EXPOSURE="$2"; shift 2 ;;
+      --auto)
+        GAIN="auto"; shift ;;
+      *)
+        break ;;
+    esac
+  done
+  REMAINING_ARGS="$@"
+}
+
+running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF" 2>/dev/null)" 2>/dev/null; }
+
+# The IPU6 firmware is authenticated once per power cycle by Intel's CSE. If a stream
+# was not stopped cleanly the firmware wedges, and no amount of driver rebinding,
+# PCI rescan or module reload brings it back -- only a reboot does. Detect that here
+# so the failure is stated plainly instead of surfacing as "no camera found".
+camera_healthy() {
+  [ -e /dev/media0 ] || return 1
+  # Check for ov2740 driver bound (path varies: 18-0036 or i2c-INT3474:01)
+  [ -L /sys/bus/i2c/devices/18-0036/driver ] && return 0
+  [ -L /sys/bus/i2c/devices/i2c-INT3474:01/driver ] && return 0
+  return 1
+}
+
+require_camera() {
+  camera_healthy && return 0
+  echo "ERROR: the IPU6 camera hardware is not available." >&2
+  if dmesg 2>/dev/null | tail -60 | grep -q "FW authentication failed"; then
+    echo "  Cause: IPU6 firmware authentication failed (see 'dmesg | grep ipu6')." >&2
+  fi
+  echo "  This needs a REBOOT -- driver rebind, PCI rescan and module reload cannot" >&2
+  echo "  recover it, because the firmware is authenticated once per power cycle." >&2
+  return 1
+}
+
+start() {
+  running && { echo "bridge already running (pid $(cat $PIDF))"; return 0; }
+  require_camera || return 1
+  [ -e "$DEV" ] || { echo "ERROR: $DEV missing. Load it with:"; \
+      echo "  sudo modprobe v4l2loopback devices=1 video_nr=42 card_label='Integrated Webcam' exclusive_caps=1"; return 1; }
+  FPS=${WEBCAM_FPS:-30}
+
+  # Build exposure settings
+  local ae_opts
+  if [[ "$GAIN" == "auto" ]]; then
+    ae_opts="ae-enable=true"
+    echo "  exposure: auto"
+  else
+    ae_opts="ae-enable=false analogue-gain-mode=1 analogue-gain=$GAIN exposure-time-mode=1 exposure-time=$EXPOSURE"
+    echo "  exposure: gain=$GAIN, time=${EXPOSURE}us"
+  fi
+
+  setsid bash -c "
+    gst-launch-1.0 -q libcamerasrc \
+      $ae_opts awb-enable=true awb-mode=auto \
+      contrast=1.25 saturation=1.3 sharpness=1.0 \
+      ! video/x-raw,width=$W,height=$H,framerate=$FPS/1 \
+      ! queue max-size-buffers=5 \
+      ! videorate ! video/x-raw,framerate=$FPS/1 \
+      ! videoconvert ! video/x-raw,format=I420 ! y4menc ! fdsink 2>/dev/null \
+    | ffmpeg -hide_banner -loglevel error -f yuv4mpegpipe -i pipe:0 \
+        -vf '$CC' -r $FPS -f v4l2 -pix_fmt yuyv422 $DEV
+  " >/dev/null 2>&1 &
+  echo $! > "$PIDF"
+  sleep 4
+  if running; then
+    # refresh udev so apps see it as a capture device
+    command -v udevadm >/dev/null && sudo -n udevadm trigger --action=change "$DEV" 2>/dev/null
+    echo "bridge started (pid $(cat $PIDF)) -> $DEV   [camera LED is now ON]"
+  else
+    echo "bridge failed to start"; rm -f "$PIDF"; return 1
+  fi
+}
+
+stop() {
+  if running; then
+    PGID=$(ps -o pgid= -p "$(cat $PIDF)" 2>/dev/null | tr -d ' ')
+    # SIGINT, not SIGTERM: gst-launch only tears the libcamera pipeline down cleanly
+    # on SIGINT. Killing it hard leaves the IPU6 stream running ("stream stop time
+    # out" in dmesg), which wedges the camera firmware until the next power cycle.
+    [ -n "$PGID" ] && kill -INT -- -"$PGID" 2>/dev/null
+    for _ in $(seq 1 12); do running || break; sleep 1; done
+    if running; then
+      echo "  (clean shutdown timed out -- escalating; camera may need a reboot)" >&2
+      [ -n "$PGID" ] && kill -TERM -- -"$PGID" 2>/dev/null; sleep 2
+      [ -n "$PGID" ] && kill -9   -- -"$PGID" 2>/dev/null
+    fi
+    rm -f "$PIDF"; echo "bridge stopped  [camera LED off]"
+  else
+    rm -f "$PIDF"
+    # sweep any orphaned feeder
+    ps -eo pid,args --no-headers | grep -E 'ffmpeg .*-f v4l2 .*'"$DEV" | grep -v grep \
+      | awk '{print $1}' | xargs -r kill -INT 2>/dev/null
+    echo "bridge not running"
+  fi
+}
+
+RULE=/etc/udev/rules.d/60-webcam-hide-ipu6.rules
+
+# "exclusive" mode hides the 32 decoy IPU6 nodes so Firefox stops collapsing every
+# camera into one broken device. It is started on demand only -- never at boot.
+exclusive_on() {
+  require_camera || return 1
+  if [ ! -f "$RULE" ]; then
+    sudo mv "$RULE.disabled" "$RULE" 2>/dev/null || { echo "rule file missing"; return 1; }
+  fi
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger --subsystem-match=video4linux --action=change
+  sleep 2
+  # on demand only; the unit is deliberately NOT enabled at boot
+  systemctl is-active --quiet webcam-bridge.service || sudo systemctl start webcam-bridge.service
+  sleep 5
+  sudo udevadm trigger --action=change "$DEV" 2>/dev/null
+  if ! systemctl is-active --quiet webcam-bridge.service; then
+    echo "ERROR: bridge service did not start. Diagnose with:"
+    echo "  systemctl status webcam-bridge.service"
+    echo "  journalctl -u webcam-bridge.service -n 40"
+    exclusive_off >/dev/null 2>&1
+    echo "(reverted: decoy nodes unhidden, camera yours again)"
+    return 1
+  fi
+  echo "exclusive mode ON  -- decoy nodes hidden, bridge running as a system service."
+  echo "  Firefox, Chrome, Zoom and OBS now see only 'Integrated Webcam'."
+  echo "  Camera LED is ON until:  webcam-bridge exclusive off"
+}
+
+exclusive_off() {
+  sudo systemctl stop webcam-bridge.service 2>/dev/null
+  [ -f "$RULE" ] && sudo mv "$RULE" "$RULE.disabled"
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger --subsystem-match=video4linux --action=change
+  sleep 2
+  for n in $(seq 0 31); do sudo chmod 0660 /dev/video$n 2>/dev/null; done
+  echo "exclusive mode OFF -- raw camera yours again, service stopped, LED off."
+}
+
+# Parse options first
+parse_opts "$@"
+set -- $REMAINING_ARGS
+
+case "${1:-status}" in
+  exclusive)
+    case "${2:-}" in
+      on)  exclusive_on ;;
+      off) exclusive_off ;;
+      *)   echo "usage: webcam-bridge exclusive {on|off}"; exit 1 ;;
+    esac ;;
+  start) start ;;
+  stop) stop ;;
+  restart) stop; sleep 1; start ;;
+  status)
+    if running; then echo "RUNNING (pid $(cat $PIDF)) -> $DEV  [LED on]";
+    elif systemctl is-active --quiet webcam-bridge.service 2>/dev/null; then
+      echo "RUNNING via system service (exclusive mode) -> $DEV  [LED on]"
+    else echo "stopped  [LED off]"; fi
+    [ -f "$RULE" ] && echo "  exclusive mode: ON (decoy IPU6 nodes hidden)" \
+                   || echo "  exclusive mode: off (Firefox will not work)"
+    [ -e "$DEV" ] && v4l2-ctl -d "$DEV" --info 2>/dev/null | grep -E 'Card type|Video (Capture|Output)' | sed 's/^/  /'
+    ;;
+  *) cat <<USAGE
+usage: webcam-bridge [OPTIONS] {start|stop|restart|status|exclusive on|off}
+
+Commands:
+  start            run the bridge as your user (Chrome, Zoom, OBS, VLC)
+  stop             stop the bridge
+  restart          restart with current settings
+  status           show bridge status
+  exclusive on     hide IPU6 decoys + run as system service (for Firefox)
+  exclusive off    revert exclusive mode
+
+Exposure options (use before 'start'):
+  --bright         preset for bright rooms (gain=2.0, exposure=8000)
+  --normal         preset for normal lighting (gain=4.0, exposure=15000) [default]
+  --dark           preset for dim rooms (gain=8.0, exposure=25000)
+  --night          preset for very dark (gain=12.0, exposure=33000)
+  --auto           use auto-exposure (may flicker with backlight)
+  --gain VALUE     set manual gain (1.0-16.0)
+  --exposure VALUE set manual exposure time in microseconds (1000-33000)
+
+Examples:
+  webcam-bridge start                    # normal lighting
+  webcam-bridge --bright start           # bright room
+  webcam-bridge --gain 6.0 --exposure 20000 start   # custom values
+  webcam-bridge --auto start             # auto-exposure
+
+Nothing starts at boot. Camera LED is on only while the bridge runs.
+USAGE
+     exit 1 ;;
+esac

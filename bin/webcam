@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# webcam — tuned capture helper for the ov2740 / Intel IPU6 camera on this machine.
+#
+# Why this exists: libcamerasrc defaults ae-enable and awb-enable to FALSE, and the
+# IPU6 software ISP leaves a ~8% green cast that libcamera's awb-mode and
+# colour-gains controls do not correct. This script enables AE/AWB, applies sane
+# contrast/saturation/sharpness, and neutralises the green cast in post.
+#
+# NOTE ON $WEBCAM_CC: the channel gains below were fitted by grey-world averaging on a
+# neutral-ish, daylit indoor scene (white walls, cream clothing, window backlight).
+# They correct that scene to G-R=+0.1. They are NOT a calibrated device profile -- under
+# tungsten at night, or against a strongly coloured wall, they may over-correct toward
+# magenta. Re-fit by capturing a grey/white card and adjusting rr/bb, or set
+# WEBCAM_CC=null to disable correction entirely.
+set -euo pipefail
+
+W=${WEBCAM_WIDTH:-1920}
+H=${WEBCAM_HEIGHT:-1080}
+WARMUP=${WEBCAM_WARMUP:-45}          # frames to let AE/AWB converge before using output
+CC=${WEBCAM_CC:-colorchannelmixer=rr=1.08:gg=0.96:bb=1.06,eq=contrast=1.06:saturation=1.10}
+
+SRC=(libcamerasrc ae-enable=true awb-enable=true awb-mode=auto
+     ae-metering-mode=centre-weighted ae-constraint-mode=shadows
+     brightness=0.05 contrast=1.25 saturation=1.3 sharpness=1.0)
+CAPS="video/x-raw,width=$W,height=$H"
+
+usage() {
+  cat <<USAGE
+webcam — tuned capture for the built-in ov2740 (Intel IPU6)
+
+  webcam snap [out.jpg]        still image (default: ~/webcam-snap.jpg)
+  webcam record SECS [out.mp4] record video, H.264 encoded on the Intel iGPU (VA-API)
+  webcam preview               live preview window
+  webcam info                  show device, formats and current tuning
+
+Env overrides: WEBCAM_WIDTH WEBCAM_HEIGHT WEBCAM_WARMUP WEBCAM_FPS WEBCAM_CC
+WEBCAM_CC gains are fitted to a neutral daylit scene; re-fit for other lighting.
+Max resolution is 1920x1080. Colour correction is applied via ffmpeg (\$WEBCAM_CC).
+USAGE
+}
+
+case "${1:-}" in
+  snap)
+    OUT=${2:-$HOME/webcam-snap.jpg}
+    TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+    gst-launch-1.0 -q -e "${SRC[@]}" ! "$CAPS" ! identity eos-after=$WARMUP \
+      ! videoconvert ! jpegenc quality=95 ! multifilesink location="$TMP/f%04d.jpg" >/dev/null 2>&1
+    LAST=$(ls -1 "$TMP"/*.jpg | tail -1)
+    ffmpeg -hide_banner -loglevel error -y -i "$LAST" -vf "$CC" "$OUT"
+    echo "wrote $OUT"
+    ;;
+  record)
+    SECS=${2:?usage: webcam record SECS [out.mp4]}
+    OUT=${3:-$HOME/webcam-rec.mp4}
+    FPS=${WEBCAM_FPS:-30}
+    FRAMES=$(( WARMUP + SECS * FPS ))
+    gst-launch-1.0 -q -e "${SRC[@]}" ! "$CAPS" ! identity eos-after=$FRAMES \
+      ! videoconvert ! video/x-raw,format=I420 ! y4menc ! fdsink 2>/dev/null \
+    | ffmpeg -hide_banner -loglevel error -y -f yuv4mpegpipe -i pipe:0 \
+        -vaapi_device /dev/dri/renderD128 \
+        -vf "trim=start_frame=$WARMUP,setpts=PTS-STARTPTS,$CC,format=nv12,hwupload" \
+        -c:v h264_vaapi -b:v 4M "$OUT"
+    echo "wrote $OUT (H.264, GPU-encoded)"
+    ;;
+  preview)
+    exec gst-launch-1.0 "${SRC[@]}" ! "$CAPS" ! videoconvert ! autovideosink
+    ;;
+  info)
+    echo "== device =="
+    gst-device-monitor-1.0 Video/Source 2>/dev/null | grep -E 'name  :|device.product.name|object.serial' | head -4
+    echo "== tuning =="
+    printf '  %s\n' "${SRC[@]:1}"
+    echo "  post: $CC"
+    echo "== VA-API =="
+    vainfo 2>/dev/null | grep -E 'Driver version' || echo "  vainfo unavailable"
+    ;;
+  *) usage; exit 1 ;;
+esac

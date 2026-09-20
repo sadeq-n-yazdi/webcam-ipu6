@@ -1,0 +1,6 @@
+# Hide the 32 "Intel IPU6 ISYS Capture N" nodes from unprivileged apps.
+# They all report the identical V4L2 id (ipu6 / PCI:0000:00:05.0), which makes
+# Firefox collapse every camera into one unusable device. Only the v4l2loopback
+# device (/dev/video42) should be visible to applications.
+# The webcam-bridge systemd service runs as root and still has access.
+SUBSYSTEM=="video4linux", ATTR{name}=="Intel IPU6 ISYS*", TAG-="uaccess", OWNER="root", GROUP="root", MODE="0600"
