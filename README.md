@@ -18,19 +18,76 @@ Intel IPU6 cameras don't appear as standard `/dev/video0` devices. They use libc
 ## Requirements
 
 - Linux with Intel IPU6 camera (tested on Ubuntu 24.04+)
+- Kernel 6.x or newer (IPU6 drivers built-in)
 - v4l2loopback-dkms
 - GStreamer 1.x with libcamera plugin
 - FFmpeg with v4l2 support
 - PipeWire
 
+## Supported Hardware
+
+Intel IPU6 cameras are found in:
+- ThinkPad X1 Carbon Gen 10/11/12
+- ThinkPad X1 Yoga Gen 7/8
+- ThinkPad T14s Gen 3/4
+- Dell XPS 13 Plus (2022+)
+- Other laptops with OmniVision OV2740, OV5693, or similar MIPI sensors
+
+## Ubuntu IPU6 Setup
+
+### Ubuntu 24.04+ (Recommended)
+
+IPU6 drivers are **built into the kernel** - no extra drivers needed!
+
+```bash
+# Verify your camera is detected
+sudo dmesg | grep -i "ipu6\|ov2740"
+# Should show: "intel-ipu6: Found supported sensor" and "Connected 1 cameras"
+
+# Check libcamera sees it
+gst-device-monitor-1.0 Video/Source | grep -A5 "Built-in"
+```
+
+### Ubuntu 22.04 (Older)
+
+You may need the Intel IPU6 DKMS drivers:
+
+```bash
+# Add Intel camera repository
+sudo add-apt-repository ppa:oem-solutions-group/intel-ipu6
+sudo apt update
+
+# Install IPU6 drivers
+sudo apt install intel-ipu6-dkms intel-ipu6ep-camera
+
+# Reboot
+sudo reboot
+```
+
+**Note:** On kernels 6.x+, the in-tree drivers are preferred. Remove DKMS drivers if you have issues:
+```bash
+sudo apt remove intel-ipu6-dkms intel-ipu6ep-camera
+```
+
+### Verify Camera Works
+
+```bash
+# Should show "Built-in Front Camera"
+gst-device-monitor-1.0 Video/Source
+
+# Test capture (creates test.jpg)
+gst-launch-1.0 libcamerasrc ! video/x-raw,width=1280,height=720 ! videoconvert ! jpegenc ! filesink location=test.jpg
+```
+
 ## Installation
 
 ```bash
 # Install dependencies
-sudo apt install v4l2loopback-dkms gstreamer1.0-libcamera ffmpeg v4l-utils
+sudo apt install v4l2loopback-dkms gstreamer1.0-libcamera gstreamer1.0-plugins-base \
+    gstreamer1.0-plugins-good ffmpeg v4l-utils libnotify-bin
 
 # Clone and run installer
-git clone https://github.com/YOUR_USERNAME/webcam-ipu6.git
+git clone https://github.com/sadeq-n-yazdi/webcam-ipu6.git
 cd webcam-ipu6
 sudo ./install.sh
 ```
