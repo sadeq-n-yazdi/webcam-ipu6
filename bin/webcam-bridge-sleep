@@ -20,6 +20,12 @@ STATE="$STATE_DIR/suspend-state"
 
 log() { echo "webcam-bridge-sleep: $*"; }
 
+# Only WEBCAM_GAIN/WEBCAM_EXPOSURE, only plain values. The env file lives in a
+# directory its owner controls, so treat it as untrusted: an unfiltered line
+# without an '=' would be taken by env(1) as the command to run instead of the
+# bridge, and anything else could smuggle variables into the restarted process.
+sanitise_env() { grep -E '^WEBCAM_(GAIN|EXPOSURE)=[A-Za-z0-9._+-]+$'; }
+
 # Same check as webcam-bridge's camera_healthy(): is the IPU6 sensor there at all?
 camera_healthy() {
   [ -e /dev/media0 ] || return 1
@@ -42,6 +48,7 @@ do_pre() {
 
   local recorded=0
   mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
   : > "$STATE.tmp"
 
   if systemctl is-active --quiet webcam-bridge.service 2>/dev/null; then
@@ -63,8 +70,15 @@ do_pre() {
     log "stopping user bridge for uid $uid"
     echo "user $uid" >> "$STATE.tmp"
     # Carry the exposure settings over so resume restores the same picture.
+    # Read it AS THE OWNING USER: /run/user/$uid is theirs, so a root-side copy
+    # would happily follow a symlink planted there and dump, say, /etc/shadow
+    # into our state dir. Dropping privileges makes that read gain nothing, and
+    # the allowlist drops anything that is not a plain exposure setting.
     envf="/run/user/$uid/webcam-bridge.env"
-    [ -f "$envf" ] && cp -f "$envf" "$STATE_DIR/user-$uid.env"
+    ( umask 077
+      runuser -u "$(id -nu "$uid")" -- cat -- "$envf" 2>/dev/null \
+        | sanitise_env > "$STATE_DIR/user-$uid.env" )
+    [ -s "$STATE_DIR/user-$uid.env" ] || rm -f "$STATE_DIR/user-$uid.env"
     recorded=1
 
     # Reuse the script's own stop: PGID + SIGINT + wait + escalation, all of which
@@ -103,7 +117,7 @@ do_resume() {
 
   # One attempt per entry, no retry loop: re-poking wedged IPU6 firmware makes
   # things worse, and the failure message in the journal is the useful output.
-  local kind uid bridge envf
+  local kind uid bridge envf settings
   while read -r kind uid; do
     case "$kind" in
       service)
@@ -116,9 +130,11 @@ do_resume() {
         log "restarting user bridge for uid $uid"
         # The env file holds WEBCAM_GAIN=/WEBCAM_EXPOSURE= lines, which webcam-bridge
         # already honours -- no extra CLI plumbing needed to restore the settings.
-        # shellcheck disable=SC2046
+        # Re-checked here rather than trusted: these words are about to become argv.
+        settings=$(sanitise_env < "$envf" 2>/dev/null | tr '\n' ' ')
+        # shellcheck disable=SC2086
         runuser -u "$(id -nu "$uid")" -- env "XDG_RUNTIME_DIR=/run/user/$uid" \
-          $([ -f "$envf" ] && cat "$envf") "$bridge" start \
+          $settings "$bridge" start \
           || log "uid $uid: bridge failed to start"
         ;;
     esac

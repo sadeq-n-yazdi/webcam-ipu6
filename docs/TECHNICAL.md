@@ -116,7 +116,15 @@ inside a hibernation image — both of which are the wanted behaviour):
 | File | Contents |
 |------|----------|
 | `suspend-state` | One line per thing that was running: `service -` or `user <uid>` |
-| `user-<uid>.env` | Copy of that user's `WEBCAM_GAIN`/`WEBCAM_EXPOSURE` at stop time |
+| `user-<uid>.env` | That user's `WEBCAM_GAIN`/`WEBCAM_EXPOSURE` at stop time, mode 0600 |
+
+The env file sits in `/run/user/<uid>`, which its owner controls, so the hook treats it
+as untrusted input. It is read with `runuser` as that user — a root-side `cp` would
+follow a symlink planted there and copy, say, `/etc/shadow` into the state dir — and
+filtered through an allowlist (`WEBCAM_GAIN`/`WEBCAM_EXPOSURE`, plain values only),
+re-applied on resume because those words become argv for `env`. An unfiltered line
+without an `=` would otherwise be run by `env` as the command instead of the bridge.
+`/run/webcam-bridge` is mode 0700.
 
 `webcam-bridge start` now writes `$XDG_RUNTIME_DIR/webcam-bridge.env` alongside its PID
 file; resume feeds it back through the environment, so the restored stream has the same
