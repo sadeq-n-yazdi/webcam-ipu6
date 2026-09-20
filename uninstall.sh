@@ -19,7 +19,11 @@ sudo -u "$REAL_USER" "$REAL_HOME/.local/bin/webcam-bridge" stop 2>/dev/null || t
 # Remove system files
 echo "Removing system files..."
 rm -f /usr/local/bin/webcam-bridge-run
+rm -f /usr/local/bin/webcam-bridge-sleep
 rm -f /etc/systemd/system/webcam-bridge.service
+rm -f /etc/systemd/system/webcam-bridge-resume.service
+rm -f /usr/lib/systemd/system-sleep/webcam-bridge
+rm -rf /run/webcam-bridge
 rm -f /etc/modprobe.d/v4l2loopback.conf
 rm -f /etc/modules-load.d/v4l2loopback.conf
 rm -f /etc/udev/rules.d/99-v4l2loopback.rules

@@ -1,0 +1,14 @@
+[Unit]
+Description=Restart the webcam bridge after resume from suspend/hibernate
+Documentation=https://github.com/sadeq-n-yazdi/webcam-ipu6/blob/main/docs/TECHNICAL.md
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+# Started on demand by the system-sleep hook, never enabled at boot. It needs its
+# own cgroup: a bridge started from the hook itself would be killed when
+# systemd-suspend.service exits, leaving the IPU6 stream un-stopped.
+ExecStart=/usr/local/bin/webcam-bridge-sleep resume
+# Waits up to ~20s for the camera to reappear, then makes a single start attempt.
+TimeoutStartSec=90
+Restart=no

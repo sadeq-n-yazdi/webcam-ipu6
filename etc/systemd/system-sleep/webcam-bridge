@@ -1,0 +1,13 @@
+#!/bin/sh
+# systemd-sleep hook: covers suspend, hibernate, hybrid-sleep and suspend-then-hibernate.
+# Installed to /usr/lib/systemd/system-sleep/webcam-bridge (mode 755).
+#
+# pre:  stop the bridge synchronously -- the suspend waits for the IPU6 stream to be
+#       torn down cleanly, otherwise the firmware wedges until the next power cycle.
+# post: only kick off a separate unit. Nothing may be started from this hook: it runs
+#       inside systemd-suspend.service's cgroup, which is reaped when the hook returns.
+case "$1" in
+  pre)  /usr/local/bin/webcam-bridge-sleep pre ;;
+  post) systemctl start --no-block webcam-bridge-resume.service ;;
+esac
+exit 0

@@ -13,6 +13,7 @@ Intel IPU6 cameras don't appear as standard `/dev/video0` devices. They use libc
 - **Color correction**: Fixes the green cast common with IPU6 sensors
 - **Exposure presets**: `--bright`, `--normal`, `--dark`, `--night` for different lighting
 - **Firefox support**: Exclusive mode hides decoy IPU6 nodes that confuse Firefox
+- **Suspend-safe**: Stops the bridge before suspend/hibernate and restarts it on resume
 - **1080p @ 30fps**: Full HD output with hardware-accelerated color correction
 
 ## Requirements
@@ -205,6 +206,29 @@ export WEBCAM_CC="colorchannelmixer=rr=1.12:gg=0.94:bb=1.08,eq=contrast=1.06:sat
 webcam-bridge start
 ```
 
+## Suspend and Hibernate
+
+The bridge is stopped automatically before the machine suspends or hibernates, and
+started again after resume if it was running.
+
+This is not a convenience — it is required. If the IPU6 stream is still open when the
+machine sleeps, the kernel logs `stream stop time out`, the camera firmware wedges,
+and nothing short of a reboot brings the camera back.
+
+Both modes are handled: a bridge you started yourself (`webcam-bridge start`, with the
+exposure settings you used) and exclusive mode (`webcam-bridge.service`). If neither was
+running, nothing happens on resume. If the camera hardware does not reappear within 20
+seconds of resume, the restart is skipped and the reason is logged instead of retried.
+
+```bash
+# See what happened over the last sleep cycle
+journalctl -b -u systemd-suspend.service -u webcam-bridge-resume.service
+
+# Exercise the hook without suspending
+sudo /usr/local/bin/webcam-bridge-sleep pre
+sudo /usr/local/bin/webcam-bridge-sleep resume
+```
+
 ## Files Installed
 
 | File | Location | Purpose |
@@ -213,6 +237,9 @@ webcam-bridge start
 | `webcam-bridge` | `~/.local/bin/` | Bridge control script |
 | `webcam-bridge-run` | `/usr/local/bin/` | System service runner |
 | `webcam-bridge.service` | `/etc/systemd/system/` | Systemd service |
+| `webcam-bridge-sleep` | `/usr/local/bin/` | Suspend/resume handler |
+| `webcam-bridge-resume.service` | `/etc/systemd/system/` | Restarts the bridge after resume |
+| `webcam-bridge` | `/usr/lib/systemd/system-sleep/` | Sleep/wake hook |
 | `v4l2loopback.conf` | `/etc/modprobe.d/` | Loopback module config |
 | `99-v4l2loopback.rules` | `/etc/udev/rules.d/` | Device permissions |
 | `99-webcam-symlink.rules` | `/etc/udev/rules.d/` | `/dev/webcam` symlink |

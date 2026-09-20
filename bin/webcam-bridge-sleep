@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# webcam-bridge-sleep -- stop the bridge before suspend/hibernate, bring it back after.
+#
+# The IPU6 stream MUST be torn down before the machine sleeps. If it is not, the
+# kernel logs "stream stop time out" on the way down, the firmware wedges, and the
+# CSE refuses to re-authenticate it until the next power cycle -- i.e. resuming
+# leaves you with a dead camera until you reboot.
+#
+#   pre      stop whatever is running, remember what it was. Synchronous: it runs
+#            from the system-sleep hook and deliberately blocks the suspend until
+#            teardown has finished.
+#   resume   restart exactly what was stopped. Runs from webcam-bridge-resume.service,
+#            NOT from the sleep hook: anything started by the hook lives in
+#            systemd-suspend.service's cgroup and is SIGKILLed when that unit exits,
+#            which would re-create the very wedge this script exists to prevent.
+set -uo pipefail
+
+STATE_DIR=/run/webcam-bridge
+STATE="$STATE_DIR/suspend-state"
+
+log() { echo "webcam-bridge-sleep: $*"; }
+
+# Same check as webcam-bridge's camera_healthy(): is the IPU6 sensor there at all?
+camera_healthy() {
+  [ -e /dev/media0 ] || return 1
+  [ -L /sys/bus/i2c/devices/18-0036/driver ] && return 0
+  [ -L /sys/bus/i2c/devices/i2c-INT3474:01/driver ] && return 0
+  return 1
+}
+
+user_bridge() {  # $1 = uid  -> prints path to that user's webcam-bridge, if any
+  local home
+  home=$(getent passwd "$1" | cut -d: -f6) || return 1
+  [ -n "$home" ] && [ -x "$home/.local/bin/webcam-bridge" ] || return 1
+  echo "$home/.local/bin/webcam-bridge"
+}
+
+do_pre() {
+  # Idempotent: suspend-then-hibernate fires the hooks more than once; the first
+  # pass already stopped everything, so never clobber the state it recorded.
+  [ -e "$STATE" ] && { log "state already recorded, nothing to do"; return 0; }
+
+  local recorded=0
+  mkdir -p "$STATE_DIR"
+  : > "$STATE.tmp"
+
+  if systemctl is-active --quiet webcam-bridge.service 2>/dev/null; then
+    log "stopping webcam-bridge.service (exclusive mode)"
+    echo "service -" >> "$STATE.tmp"
+    recorded=1
+    # Straight stop -- the udev rule hiding the decoy nodes stays in place across
+    # sleep, so this must not go through 'exclusive off'.
+    systemctl stop webcam-bridge.service
+  fi
+
+  local pidf uid bridge envf
+  for pidf in /run/user/*/webcam-bridge.pid; do
+    [ -e "$pidf" ] || continue
+    uid=$(basename "$(dirname "$pidf")")
+    kill -0 "$(cat "$pidf" 2>/dev/null)" 2>/dev/null || continue
+    bridge=$(user_bridge "$uid") || { log "uid $uid has a bridge pid but no webcam-bridge script"; continue; }
+
+    log "stopping user bridge for uid $uid"
+    echo "user $uid" >> "$STATE.tmp"
+    # Carry the exposure settings over so resume restores the same picture.
+    envf="/run/user/$uid/webcam-bridge.env"
+    [ -f "$envf" ] && cp -f "$envf" "$STATE_DIR/user-$uid.env"
+    recorded=1
+
+    # Reuse the script's own stop: PGID + SIGINT + wait + escalation, all of which
+    # the repo already relies on for a clean libcamera teardown.
+    # WEBCAM_STOP_WAIT: be more patient than the interactive default before
+    # escalating to SIGKILL -- a hard kill here is what wedges the firmware, and
+    # systemd-suspend.service imposes no start timeout on us.
+    runuser -u "$(id -nu "$uid")" -- env "XDG_RUNTIME_DIR=/run/user/$uid" \
+      WEBCAM_STOP_WAIT=30 "$bridge" stop
+  done
+
+  if [ "$recorded" -eq 1 ]; then
+    mv "$STATE.tmp" "$STATE"
+  else
+    rm -f "$STATE.tmp"
+    log "bridge was not running, nothing to stop"
+  fi
+}
+
+do_resume() {
+  [ -e "$STATE" ] || { log "nothing was running before sleep"; return 0; }
+
+  # /dev/media0 and the ov2740 i2c binding can reappear a few seconds after resume.
+  local waited=0
+  while ! camera_healthy; do
+    [ "$waited" -ge 20 ] && break
+    sleep 1; waited=$((waited + 1))
+  done
+  if ! camera_healthy; then
+    log "camera did not come back within ${waited}s -- not starting the bridge."
+    log "  If dmesg shows 'FW authentication failed', only a reboot recovers it."
+    rm -f "$STATE" "$STATE_DIR"/user-*.env
+    return 1
+  fi
+  [ "$waited" -gt 0 ] && log "camera became available after ${waited}s"
+
+  # One attempt per entry, no retry loop: re-poking wedged IPU6 firmware makes
+  # things worse, and the failure message in the journal is the useful output.
+  local kind uid bridge envf
+  while read -r kind uid; do
+    case "$kind" in
+      service)
+        log "restarting webcam-bridge.service"
+        systemctl start webcam-bridge.service || log "webcam-bridge.service failed to start"
+        ;;
+      user)
+        bridge=$(user_bridge "$uid") || { log "uid $uid: webcam-bridge script gone"; continue; }
+        envf="$STATE_DIR/user-$uid.env"
+        log "restarting user bridge for uid $uid"
+        # The env file holds WEBCAM_GAIN=/WEBCAM_EXPOSURE= lines, which webcam-bridge
+        # already honours -- no extra CLI plumbing needed to restore the settings.
+        # shellcheck disable=SC2046
+        runuser -u "$(id -nu "$uid")" -- env "XDG_RUNTIME_DIR=/run/user/$uid" \
+          $([ -f "$envf" ] && cat "$envf") "$bridge" start \
+          || log "uid $uid: bridge failed to start"
+        ;;
+    esac
+  done < "$STATE"
+
+  rm -f "$STATE" "$STATE_DIR"/user-*.env
+}
+
+case "${1:-}" in
+  pre)    do_pre ;;
+  resume) do_resume ;;
+  *) echo "usage: webcam-bridge-sleep {pre|resume}" >&2; exit 1 ;;
+esac

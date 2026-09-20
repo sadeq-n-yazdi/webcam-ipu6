@@ -11,6 +11,9 @@ W=${WEBCAM_WIDTH:-1920}
 H=${WEBCAM_HEIGHT:-1080}
 CC=${WEBCAM_CC:-colorchannelmixer=rr=1.08:gg=0.96:bb=1.06,eq=contrast=1.06:saturation=1.10}
 PIDF=${XDG_RUNTIME_DIR:-/tmp}/webcam-bridge.pid
+# Records the exposure settings in use, so the suspend/resume hook can bring the
+# bridge back exactly as it was.
+ENVF=${XDG_RUNTIME_DIR:-/tmp}/webcam-bridge.env
 
 # Default exposure settings
 GAIN=${WEBCAM_GAIN:-4.0}
@@ -95,13 +98,14 @@ start() {
         -vf '$CC' -r $FPS -f v4l2 -pix_fmt yuyv422 $DEV
   " >/dev/null 2>&1 &
   echo $! > "$PIDF"
+  printf 'WEBCAM_GAIN=%s\nWEBCAM_EXPOSURE=%s\n' "$GAIN" "$EXPOSURE" > "$ENVF"
   sleep 4
   if running; then
     # refresh udev so apps see it as a capture device
     command -v udevadm >/dev/null && sudo -n udevadm trigger --action=change "$DEV" 2>/dev/null
     echo "bridge started (pid $(cat $PIDF)) -> $DEV   [camera LED is now ON]"
   else
-    echo "bridge failed to start"; rm -f "$PIDF"; return 1
+    echo "bridge failed to start"; rm -f "$PIDF" "$ENVF"; return 1
   fi
 }
 
@@ -112,15 +116,18 @@ stop() {
     # on SIGINT. Killing it hard leaves the IPU6 stream running ("stream stop time
     # out" in dmesg), which wedges the camera firmware until the next power cycle.
     [ -n "$PGID" ] && kill -INT -- -"$PGID" 2>/dev/null
-    for _ in $(seq 1 12); do running || break; sleep 1; done
+    # The suspend hook raises WEBCAM_STOP_WAIT: escalating to SIGKILL is what
+    # produces "stream stop time out", and there is no time pressure on the way
+    # into a suspend, so waiting longer is strictly better there.
+    for _ in $(seq 1 "${WEBCAM_STOP_WAIT:-12}"); do running || break; sleep 1; done
     if running; then
       echo "  (clean shutdown timed out -- escalating; camera may need a reboot)" >&2
       [ -n "$PGID" ] && kill -TERM -- -"$PGID" 2>/dev/null; sleep 2
       [ -n "$PGID" ] && kill -9   -- -"$PGID" 2>/dev/null
     fi
-    rm -f "$PIDF"; echo "bridge stopped  [camera LED off]"
+    rm -f "$PIDF" "$ENVF"; echo "bridge stopped  [camera LED off]"
   else
-    rm -f "$PIDF"
+    rm -f "$PIDF" "$ENVF"
     # sweep any orphaned feeder
     ps -eo pid,args --no-headers | grep -E 'ffmpeg .*-f v4l2 .*'"$DEV" | grep -v grep \
       | awk '{print $1}' | xargs -r kill -INT 2>/dev/null

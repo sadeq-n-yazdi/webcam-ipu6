@@ -27,7 +27,12 @@ apt-get install -y v4l2loopback-dkms gstreamer1.0-libcamera gstreamer1.0-plugins
 # Copy system files
 echo "Installing system files..."
 install -m 755 "$SCRIPT_DIR/bin/webcam-bridge-run.system" /usr/local/bin/webcam-bridge-run
+install -m 755 "$SCRIPT_DIR/bin/webcam-bridge-sleep" /usr/local/bin/webcam-bridge-sleep
 install -m 644 "$SCRIPT_DIR/etc/systemd/system/webcam-bridge.service" /etc/systemd/system/
+install -m 644 "$SCRIPT_DIR/etc/systemd/system/webcam-bridge-resume.service" /etc/systemd/system/
+# Suspend/hibernate hook: stops the bridge on the way down, restarts it on resume.
+install -d -m 755 /usr/lib/systemd/system-sleep
+install -m 755 "$SCRIPT_DIR/etc/systemd/system-sleep/webcam-bridge" /usr/lib/systemd/system-sleep/webcam-bridge
 install -m 644 "$SCRIPT_DIR/etc/modprobe.d/v4l2loopback.conf" /etc/modprobe.d/
 install -m 644 "$SCRIPT_DIR/etc/udev/rules.d/99-v4l2loopback.rules" /etc/udev/rules.d/
 install -m 644 "$SCRIPT_DIR/etc/udev/rules.d/99-webcam-symlink.rules" /etc/udev/rules.d/

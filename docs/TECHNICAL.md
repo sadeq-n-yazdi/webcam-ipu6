@@ -91,12 +91,73 @@ This:
 3. Runs the bridge as a system service
 4. Firefox now sees only `/dev/video42`
 
+## Suspend and Hibernate
+
+Sleeping with the IPU6 stream open is the same failure as killing the pipeline hard:
+`stream stop time out` in dmesg, wedged firmware, camera gone until a power cycle. The
+bridge is therefore torn down before sleep and brought back after resume.
+
+```
+/usr/lib/systemd/system-sleep/webcam-bridge
+  pre  -> /usr/local/bin/webcam-bridge-sleep pre        (synchronous, blocks the suspend)
+  post -> systemctl start --no-block webcam-bridge-resume.service
+                 -> /usr/local/bin/webcam-bridge-sleep resume
+```
+
+**Why resume goes through a unit instead of the hook.** Everything the `post` hook spawns
+lives in `systemd-suspend.service`'s cgroup, which is reaped when that unit exits —
+`setsid` does not escape it. A bridge started from the hook would be SIGKILLed moments
+later, leaving the stream un-stopped: the exact wedge this whole design avoids.
+`webcam-bridge-resume.service` gets its own cgroup and outlives the hook.
+
+**State** is written to `/run/webcam-bridge/` (tmpfs: gone after a real boot, preserved
+inside a hibernation image — both of which are the wanted behaviour):
+
+| File | Contents |
+|------|----------|
+| `suspend-state` | One line per thing that was running: `service -` or `user <uid>` |
+| `user-<uid>.env` | Copy of that user's `WEBCAM_GAIN`/`WEBCAM_EXPOSURE` at stop time |
+
+`webcam-bridge start` now writes `$XDG_RUNTIME_DIR/webcam-bridge.env` alongside its PID
+file; resume feeds it back through the environment, so the restored stream has the same
+exposure as before the sleep.
+
+Details that matter:
+
+- Teardown calls the user's own `webcam-bridge stop` via `runuser`, reusing the
+  PGID + SIGINT + wait + escalation path rather than reimplementing it. It passes
+  `WEBCAM_STOP_WAIT=30` (interactive default: 12): escalating to SIGKILL is exactly
+  what produces `stream stop time out`, and `systemd-suspend.service` sets no start
+  timeout, so patience costs nothing here.
+- Exclusive mode is stopped with a plain `systemctl stop`, **not** `exclusive off` — the
+  udev rule hiding the decoy nodes stays in place across the sleep.
+- `pre` is idempotent and never clobbers existing state, so `suspend-then-hibernate`
+  firing the hooks twice is harmless.
+- `resume` polls `camera_healthy()` for up to 20s, then makes exactly one start attempt.
+  No retry loop: repeatedly re-initialising wedged firmware makes it worse, and the
+  "needs a reboot" message in the journal is the useful outcome.
+
+Both halves can be exercised without suspending:
+
+```bash
+sudo /usr/local/bin/webcam-bridge-sleep pre
+sudo /usr/local/bin/webcam-bridge-sleep resume
+journalctl -b -u systemd-suspend.service -u webcam-bridge-resume.service
+```
+
+After a real suspend cycle the check that actually discriminates is
+`dmesg | grep -i 'ipu6\|stream stop'` — no `stream stop time out` means the pre hook
+finished before the kernel went down.
+
 ## File Locations
 
 | File | Purpose |
 |------|---------|
 | `/usr/local/bin/webcam-bridge-run` | System service runner |
+| `/usr/local/bin/webcam-bridge-sleep` | Suspend/resume handler |
 | `/etc/systemd/system/webcam-bridge.service` | Systemd service |
+| `/etc/systemd/system/webcam-bridge-resume.service` | Restarts the bridge after resume |
+| `/usr/lib/systemd/system-sleep/webcam-bridge` | Sleep/wake hook |
 | `/etc/modprobe.d/v4l2loopback.conf` | Module configuration |
 | `/etc/udev/rules.d/99-v4l2loopback.rules` | Device permissions |
 | `/etc/udev/rules.d/99-webcam-symlink.rules` | /dev/webcam symlink |
