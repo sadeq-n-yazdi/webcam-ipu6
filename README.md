@@ -90,6 +90,37 @@ ffplay /dev/webcam           # FFmpeg
 | `--dark`  | 8.0  | 25000         | Dim room, evening |
 | `--night` | 12.0 | 33000         | Very dark, night |
 
+## Keyboard Shortcut (F12 Toggle)
+
+Set up a hotkey to toggle the webcam bridge on/off:
+
+### GNOME (Ubuntu, Fedora)
+
+1. Open **Settings** → **Keyboard** → **Keyboard Shortcuts** → **Custom Shortcuts**
+2. Click **+** to add a new shortcut
+3. Set:
+   - **Name:** Toggle Webcam
+   - **Command:** `~/.local/bin/webcam-toggle`
+   - **Shortcut:** Press F12 (or your preferred key)
+
+Or via command line:
+```bash
+# Create the custom shortcut
+CUSTOM_PATH="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/webcam-toggle/"
+gsettings set "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$CUSTOM_PATH" name "Toggle Webcam"
+gsettings set "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$CUSTOM_PATH" command "$HOME/.local/bin/webcam-toggle"
+gsettings set "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$CUSTOM_PATH" binding "F12"
+
+# Add to the custom keybindings list
+gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "['$CUSTOM_PATH']"
+```
+
+### Other Desktop Environments
+
+- **KDE:** System Settings → Shortcuts → Custom Shortcuts
+- **XFCE:** Settings → Keyboard → Application Shortcuts
+- **i3/sway:** Add to config: `bindsym F12 exec ~/.local/bin/webcam-toggle`
+
 ## Troubleshooting
 
 ### Camera not found after failed shutdown
