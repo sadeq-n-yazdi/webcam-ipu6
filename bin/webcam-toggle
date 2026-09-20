@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Toggle webcam bridge on/off
+
+if pgrep -f "gst-launch.*libcamerasrc" >/dev/null || pgrep -f "ffmpeg.*video42" >/dev/null; then
+    ~/.local/bin/webcam-bridge stop
+    notify-send -i camera-disabled "Webcam" "Bridge stopped"
+else
+    ~/.local/bin/webcam-bridge start
+    notify-send -i camera-web "Webcam" "Bridge started"
+fi
