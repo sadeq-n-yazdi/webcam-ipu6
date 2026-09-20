@@ -1,6 +1,6 @@
 [Unit]
 Description=Webcam bridge (libcamera/IPU6 -> v4l2loopback /dev/video42)
-Documentation=file:///home/sadeq/.claude/SYSTEM.md
+Documentation=https://github.com/sadeq-n-yazdi/webcam-ipu6/blob/main/docs/TECHNICAL.md
 After=sound.target
 
 [Service]
